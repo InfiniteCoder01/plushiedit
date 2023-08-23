@@ -1,9 +1,19 @@
+use bidivec::*;
 use raylib::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Default)]
 struct PlushieStructure {
     points: Vec<(i32, i32)>,
+    springs: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ImagePixelState {
+    #[default]
+    Unspecified,
+    Inside,
+    Edge,
 }
 
 fn main() {
@@ -48,7 +58,8 @@ fn main() {
                 if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT) {
                     structure.points.remove(index);
                 } else if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
-                    *point = (mouse.x as i32, mouse.y as i32);
+                    point.0 = (mouse.x as i32).clamp(1, image.width - 2);
+                    point.1 = (mouse.y as i32).clamp(1, image.height - 2);
                 }
                 break;
             }
@@ -64,21 +75,28 @@ fn main() {
                     let distance = point1.distance_to(point0);
                     let mouse_distance = point0.distance_to(mouse) + point1.distance_to(mouse);
                     if mouse_distance - distance < point_size {
-                        structure.points.insert(index, (mouse.x as _, mouse.y as _));
+                        structure.points.insert(
+                            index,
+                            (
+                                (mouse.x as i32).clamp(1, image.width - 2),
+                                (mouse.y as i32).clamp(1, image.height - 2),
+                            ),
+                        );
                         found = true;
                         break;
                     }
                 }
             }
             if !found {
-                structure.points.push((mouse.x as _, mouse.y as _));
+                structure.points.push((
+                    (mouse.x as i32).clamp(1, image.width - 2),
+                    (mouse.y as i32).clamp(1, image.height - 2),
+                ));
             }
         }
 
-        if rl.is_key_pressed(KeyboardKey::KEY_W) {
-            std::fs::write(&ron_path, ron::to_string(&structure).unwrap())
-                .expect("Failed to write!");
-        }
+        let ctrl = rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL);
+        let save_key = rl.is_key_down(KeyboardKey::KEY_S);
 
         let window_size = (rl.get_screen_width(), rl.get_screen_height());
         let mut d = rl.begin_drawing(&thread);
@@ -97,7 +115,7 @@ fn main() {
                 )
             }
         }
-        d.draw_texture_ex(&image, Vector2::zero(), 0.0, scale as _, Color::WHITE);
+        d.draw_texture_ex(&image, Vector2::zero(), 0.0, scale, Color::WHITE);
         for (index, point1) in structure.points.iter().enumerate() {
             let point2 = structure.points[(index + 1) % structure.points.len()];
             d.draw_line_ex(
@@ -114,6 +132,58 @@ fn main() {
                 point_size,
                 Color::RED,
             );
+        }
+
+        if ctrl {
+            let mut map = bidiarray![ImagePixelState::Unspecified; image.width() as usize, image.height() as usize];
+            for (index, &point1) in structure.points.iter().enumerate() {
+                let point2 = structure.points[(index + 1) % structure.points.len()];
+                for point in line_drawing::Bresenham::new(point1, point2) {
+                    map[(point.0 as usize, point.1 as usize)] = ImagePixelState::Edge;
+                }
+            }
+            editing::flood_fill(
+                &mut map,
+                (mouse.x as usize, mouse.y as usize),
+                BidiNeighbours::Adjacent,
+                |_, a, b| a == b,
+                |pixel, _| *pixel = ImagePixelState::Inside,
+            )
+            .unwrap();
+
+            for y in 0..map.height() {
+                for x in 0..map.width() {
+                    if map[(x, y)] == ImagePixelState::Inside {
+                        d.draw_rectangle(
+                            ((x as f32) * scale) as _,
+                            ((y as f32) * scale) as _,
+                            scale as _,
+                            scale as _,
+                            Color::new(255, 255, 255, 50),
+                        );
+                    }
+                }
+            }
+
+            if save_key {
+                structure.springs.clear();
+                for (index1, &point1) in structure.points[..structure.points.len() - 1]
+                    .iter()
+                    .enumerate()
+                {
+                    for (index2, &point2) in structure.points[index1 + 1..].iter().enumerate() {
+                        let index2 = index2 + index1 + 1;
+                        if line_drawing::Bresenham::new(point1, point2).all(|point| {
+                            map[(point.0 as usize, point.1 as usize)]
+                                != ImagePixelState::Unspecified
+                        }) {
+                            structure.springs.push((index1, index2))
+                        }
+                    }
+                }
+                std::fs::write(&ron_path, ron::to_string(&structure).unwrap())
+                    .expect("Failed to write!");
+            }
         }
     }
 }
